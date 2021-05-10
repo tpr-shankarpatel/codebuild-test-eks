@@ -1,0 +1,34 @@
+---
+version: 0.2
+phases:
+  install:
+    commands:
+      - curl -sS -o aws-iam-authenticator https://amazon-eks.s3-us-west-2.amazonaws.com/1.10.3/2018-07-26/bin/linux/amd64/aws-iam-authenticator
+      - curl -sS -o kubectl https://amazon-eks.s3-us-west-2.amazonaws.com/1.14.6/2019-08-22/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl ./aws-iam-authenticator
+      - export PATH=$PWD/:$PATH
+      - apt-get update && apt-get -y install jq python3-pip python3-dev && pip3 install --upgrade awscli
+  pre_build:
+      commands:
+        - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+        - TAG="${COMMIT_HASH:=latest}"
+        - sed -i 's@CONTAINER_IMAGE@'"$IMAGE_REPO_NAME/$IMAGE_NAME:$TAG"'@' test-nginx.yml
+        - docker login --username $USERNAME --password $PASSWORD
+        - export KUBECONFIG=$HOME/.kube/config
+  build:
+    commands:
+      - docker build --tag $IMAGE_NAME:$TAG .
+      - docker tag $IMAGE_NAME:$TAG $IMAGE_REPO_NAME/$IMAGE_NAME:$TAG
+  post_build:
+    commands:
+      - docker push $IMAGE_REPO_NAME/$IMAGE_NAME:$TAG
+      - CREDENTIALS=$(aws sts assume-role --role-arn $EKS_KUBECTL_ROLE_ARN --role-session-name codebuild-kubectl --duration-seconds 900)
+      - export AWS_ACCESS_KEY_ID="$(echo ${CREDENTIALS} | jq -r '.Credentials.AccessKeyId')"
+      - export AWS_SECRET_ACCESS_KEY="$(echo ${CREDENTIALS} | jq -r '.Credentials.SecretAccessKey')"
+      - export AWS_SESSION_TOKEN="$(echo ${CREDENTIALS} | jq -r '.Credentials.SessionToken')"
+      - export AWS_EXPIRATION=$(echo ${CREDENTIALS} | jq -r '.Credentials.Expiration')
+      - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME
+      - kubectl apply -f test-nginx.yml
+      - printf '[{"name":"nginx","imageUri":"%s"}]' $IMAGE_REPO_NAME/$IMAGE_NAME:$TAG > build.json
+artifacts:
+  files: build.json
